@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>单摆动画示例</title>
+  <style>
+    :root{--bg:#0f1724;--panel:#0b1220;--accent:#38bdf8;--text:#e6eef8}
+    html,body{height:100%;margin:0;font-family:system-ui,Segoe UI,Roboto,"Noto Sans SC",sans-serif;background:var(--bg);color:var(--text)}
+    .wrap{display:flex;gap:16px;padding:18px;height:100%;box-sizing:border-box}
+    .canvas-wrap{flex:1;display:flex;align-items:center;justify-content:center}
+    canvas{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.02));border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.6)}
+    .panel{width:320px;background:var(--panel);border-radius:10px;padding:14px;box-shadow:0 6px 18px rgba(0,0,0,0.5)}
+    h2{margin:0 0 8px 0;font-size:16px}
+    label{display:block;font-size:13px;margin-top:10px}
+    .row{display:flex;gap:8px;align-items:center}
+    input[type=range]{width:100%}
+    input[type=number]{width:72px}
+    button{margin-top:12px;padding:8px 10px;border-radius:8px;border:0;background:var(--accent);color:#012a38;cursor:pointer}
+    .small{font-size:12px;color:#9fb4c8}
+    footer{margin-top:12px;font-size:12px;color:#8da5bf}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="canvas-wrap">
+      <canvas id="canvas" width="900" height="600"></canvas>
+    </div>
+    <div class="panel">
+      <h2>单摆模拟（完整非线性方程）</h2>
+      <div class="small">物理：θ'' = -(g / L) * sin(θ) ，使用显式时间步进积分</div>
+
+      <label>摆长 L (<span id="lenVal">220</span> px)
+        <div class="row"><input id="length" type="range" min="50" max="400" value="220"></div>
+      </label>
+
+      <label>重力 g (<span id="gVal">9.8</span> m/s²)
+        <div class="row"><input id="gravity" type="range" min="0.1" max="20" step="0.1" value="9.8"></div>
+      </label>
+
+      <label>阻尼（摩擦）d (<span id="dampVal">0.01</span>)
+        <div class="row"><input id="damping" type="range" min="0" max="0.1" step="0.001" value="0.01"></div>
+      </label>
+
+      <label>初始角度 θ0 (度) <span id="angleNum">30</span>
+        <div class="row"><input id="angle" type="range" min="-170" max="170" value="30"></div>
+      </label>
+
+      <label>时间步长 dt (s)
+        <div class="row"><input id="dt" type="range" min="0.001" max="0.03" step="0.001" value="0.016"><input id="dtNum" type="number" step="0.001" value="0.016"></div>
+      </label>
+
+      <div class="row">
+        <button id="toggle">暂停</button>
+        <button id="reset">重置</button>
+      </div>
+
+      <div class="small" style="margin-top:10px">说明：移动滑块会实时更新模拟参数。若要更准确的长期能量守恒，请减小 dt。</div>
+      <footer>作者示例 - 单摆动画</footer>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    // UI 元素
+    const lengthRange = document.getElementById('length');
+    const lenVal = document.getElementById('lenVal');
+    const gravityRange = document.getElementById('gravity');
+    const gVal = document.getElementById('gVal');
+    const dampingRange = document.getElementById('damping');
+    const dampVal = document.getElementById('dampVal');
+    const angleRange = document.getElementById('angle');
+    const angleNum = document.getElementById('angleNum');
+    const dtRange = document.getElementById('dt');
+    const dtNum = document.getElementById('dtNum');
+    const toggleBtn = document.getElementById('toggle');
+    const resetBtn = document.getElementById('reset');
+
+    // 初始参数
+    let origin = { x: W/2, y: 100 };
+    let L = Number(lengthRange.value); // px
+    let g = Number(gravityRange.value); // m/s^2 (单位只是比例)
+    let damping = Number(dampingRange.value);
+    let theta = Number(angleRange.value) * Math.PI/180; // rad
+    let omega = 0; // 角速度
+    let dt = Number(dtRange.value); // s
+    let running = true;
+
+    // 显示初始值
+    lenVal.textContent = L;
+    gVal.textContent = g;
+    dampVal.textContent = damping;
+    angleNum.textContent = Math.round(theta*180/Math.PI);
+
+    // UI 事件
+    lengthRange.addEventListener('input', e=>{ L = Number(e.target.value); lenVal.textContent = L; });
+    gravityRange.addEventListener('input', e=>{ g = Number(e.target.value); gVal.textContent = g; });
+    dampingRange.addEventListener('input', e=>{ damping = Number(e.target.value); dampVal.textContent = damping; });
+    angleRange.addEventListener('input', e=>{ theta = Number(e.target.value)*Math.PI/180; angleNum.textContent = Math.round(Number(e.target.value)); omega = 0; });
+    dtRange.addEventListener('input', e=>{ dt = Number(e.target.value); dtNum.value = dt; });
+    dtNum.addEventListener('change', e=>{ let v = Number(e.target.value); if(isFinite(v) && v>0){ dt = v; dtRange.value = v; }});
+
+    toggleBtn.addEventListener('click', ()=>{ running = !running; toggleBtn.textContent = running? '暂停':'开始'; });
+    resetBtn.addEventListener('click', ()=>{ theta = Number(angleRange.value)*Math.PI/180; omega = 0; });
+
+    // 绘制与积分
+    function step() {
+      // 非线性方程：θ'' = -(g/L) * sin(θ) - damping * ω
+      const alpha = -(g / L) * Math.sin(theta) - damping * omega;
+      omega += alpha * dt;
+      theta += omega * dt;
+    }
+
+    function draw() {
+      ctx.clearRect(0,0,W,H);
+
+      // 绘制支点
+      ctx.fillStyle = '#9fc9e5';
+      ctx.beginPath(); ctx.arc(origin.x, origin.y, 5, 0, Math.PI*2); ctx.fill();
+
+      // 摆球位置
+      const x = origin.x + L * Math.sin(theta);
+      const y = origin.y + L * Math.cos(theta);
+
+      // 绘制摆杆
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = '#dceffd';
+      ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(x, y); ctx.stroke();
+
+      // 绘制摆球
+      ctx.beginPath(); ctx.fillStyle = '#38bdf8'; ctx.arc(x, y, 18, 0, Math.PI*2); ctx.fill();
+
+      // 绘制投影线和信息
+      ctx.lineWidth = 1; ctx.setLineDash([6,6]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.beginPath(); ctx.moveTo(origin.x, origin.y); ctx.lineTo(origin.x+L, origin.y); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 显示数字信息
+      ctx.fillStyle = 'rgba(230,238,248,0.95)';
+      ctx.font = '13px ui-sans-serif,system-ui';
+      const deg = (theta*180/Math.PI).toFixed(2);
+      const w = omega.toFixed(3);
+      ctx.fillText(`θ = ${deg}°`, 12, H-54);
+      ctx.fillText(`ω = ${w} rad/s`, 12, H-36);
+      ctx.fillText(`L = ${L}px  g = ${g}  d = ${damping}`, 12, H-18);
+
+      // 能量（近似，视角速度和位置）
+      const KE = 0.5 * (omega*omega) * L*L; // 角动能近似
+      const PE = g * (L - (L * Math.cos(theta)));
+    }
+
+    let last = performance.now();
+    function loop(now){
+      // 使用固定步长多次子步以提高稳定性（当帧率低时）
+      const elapsed = (now - last) / 1000; // s
+      last = now;
+
+      // 将真实经过时间分割为多个 dt 步长
+      let accumulator = elapsed;
+      const maxSubSteps = 8;
+      let steps = 0;
+      while(accumulator > 0 && steps < 200){
+        const subdt = Math.min(dt, accumulator);
+        if(running) {
+          // 做多次子步
+          step();
+        }
+        accumulator -= subdt;
+        steps++;
+      }
+
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    // 自适应画布缩放（在高DPI下更清晰）
+    function resize() {
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = 900 * ratio;
+      canvas.height = 600 * ratio;
+      canvas.style.width = '900px';
+      canvas.style.height = '600px';
+      ctx.setTransform(ratio,0,0,ratio,0,0);
+      origin = { x: 900/2, y: 100 };
+    }
+
+    window.addEventListener('resize', resize);
+    resize();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
